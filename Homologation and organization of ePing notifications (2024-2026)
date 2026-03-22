@@ -1,0 +1,108 @@
+import pandas as pd
+import numpy as np
+import re
+
+# 1. Cargar el archivo original
+df_raw = pd.read_excel('Notifications (Jan 2024 - Today).xlsx')
+
+# Filtrar por UE y Medio Ambiente
+df = df_raw[
+    (df_raw['Notifying Member'] == 'European Union') & 
+    (df_raw['Objectives'].str.contains('environment', case=False, na=False))
+].copy()
+
+# 2. FUNCIÓN PARA EXTRAER CÓDIGOS
+def extraer_lista_codigos(texto):
+    if pd.isna(texto) or str(texto).lower() in ('nan', 'none', ''):
+        return []
+    elementos = str(texto).split(';')
+    codigos = []
+    for item in elementos:
+        match = re.search(r'([\d\.]+)', item)
+        if match:
+            codigos.append(match.group(1))
+    return list(set(codigos))
+
+# Aplicamos la extracción
+df['HS_Clean_List'] = df['HS code(s)'].apply(extraer_lista_codigos)
+df['ICS_Clean_List'] = df['ICS code(s)'].apply(extraer_lista_codigos)
+
+# 3. DICCIONARIO ICS -> HS
+ics_to_hs = {
+    '71': '28-38',       # Industria Química
+    '13': 'ENV-General', # Medio Ambiente
+    '55': '48-39',       # Packaging
+    '83': '39-40',       # Caucho y Plásticos
+    '43': '87',          # Vehículos de carretera
+    '29': '85',          # Ingeniería Eléctrica
+    '65': '01-24',       # Agricultura
+    '67': '16-24',       # Tecnología Alimentaria
+    '79': '44',          # Madera
+    '11': '01-05',       # Animales y productos
+    '31': '31',          # Fertilizantes
+    '47': '47',          # Industria de pasta y papel
+    '97': '94-96',       # Equipos domésticos y de ocio
+    '07': '90',          # Metrología e instrumentación
+    '33': '33',          # Química fina
+    '35': '39-40',       # Plásticos
+    '91': '91'           # Electrónica de consumo
+}
+
+# 4. LÓGICA DE PRIORIZACIÓN Y CREACIÓN DE FILAS
+rows = []
+for _, row in df.iterrows():
+    hs_list = row['HS_Clean_List']
+    ics_list = row['ICS_Clean_List']
+    
+    # Eliminar SOLO si no tiene ningún código (ni HS ni ICS)
+    if not hs_list and not ics_list:
+        continue
+        
+    # Prioridad 1: Si hay HS, una fila por cada código HS
+    if hs_list:
+        for hs in hs_list:
+            new_row = row.copy()
+            clean_hs = hs.replace('.', '')
+            new_row['HS_Separado'] = hs
+            new_row['ICS_Separado'] = ''
+            new_row['Llave_Cruce'] = clean_hs[:4] if len(clean_hs) >= 4 else clean_hs[:2]
+            rows.append(new_row)
+    
+    # Prioridad 2: Si NO hay HS pero sí ICS, una fila por cada ICS
+    else:
+        for ics in ics_list:
+            new_row = row.copy()
+            prefijo = ics.split('.')[0]
+            new_row['HS_Separado'] = ''
+            new_row['ICS_Separado'] = ics
+            new_row['Llave_Cruce'] = ics_to_hs.get(prefijo, f'ICS_{prefijo}')
+            rows.append(new_row)
+
+# 5. CONVERTIR A DATAFRAME
+df_final = pd.DataFrame(rows)
+
+# 6. SELECCIÓN DE COLUMNAS
+columnas_mantener = [
+    'Distribution date', 'Document symbol', 'Title', 'Description', 
+    'Products covered', 'HS code(s)', 'HS_Separado',
+    'ICS code(s)', 'ICS_Separado',
+    'Objectives', 'Proposed date of adoption', 
+    'Proposed date of entry into force', 
+    'Link to notification(EN)', 'Llave_Cruce'
+]
+
+df_final = df_final[[col for col in columnas_mantener if col in df_final.columns]]
+
+# 7. FIX: fillna DESPUÉS de la selección de columnas
+df_final['HS_Separado'] = df_final['HS_Separado'].fillna('')
+df_final['ICS_Separado'] = df_final['ICS_Separado'].fillna('')
+
+# 8. EXPORTACIÓN
+df_final.to_excel('Alertas_ePing_Limpias_V4.xlsx', index=False)
+
+print(f"Original UE Ambiental:        {len(df)} notificaciones")
+print(f"Eliminadas (sin HS ni ICS):   {len(df) - df_final['Document symbol'].nunique()} notificaciones")
+print(f"Notificaciones conservadas:   {df_final['Document symbol'].nunique()}")
+print(f"Filas totales tras explosión: {len(df_final)}")
+print(f"\nLlave_Cruce más frecuentes:\n{df_final['Llave_Cruce'].value_counts().head(10)}")
+print(f"\nICS sin mapear (revisar manual):\n{df_final[df_final['Llave_Cruce'].str.startswith('ICS_', na=False)]['Llave_Cruce'].value_counts()}")
