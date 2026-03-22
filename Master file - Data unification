@@ -1,0 +1,221 @@
+import pandas as pd
+import numpy as np
+
+# ============================================================
+# CARGA DE ARCHIVOS
+# ============================================================
+df_exp   = pd.read_excel('Master_Exports_UE_2019-2025.xlsx').dropna(subset=['Periodo'])
+df_tbt   = pd.read_excel('TBTs_Amb_Limpio_2019-2023.xlsx', sheet_name='HS limpio MANUFACTURAS')
+df_eping = pd.read_excel('Alertas_ePing_Limpias_V4.xlsx')
+
+df_exp['Periodo']         = df_exp['Periodo'].astype(int)
+df_exp['HS_Key']          = df_exp['HS_Key'].astype(int)
+df_exp['Codigo capitulo'] = df_exp['Codigo capitulo'].astype(int)
+df_tbt['HS_Key']          = df_tbt['HS_Key'].astype(int)
+df_tbt['HS_Cod 2']        = df_tbt['HS_Cod 2'].astype(int)
+
+# ============================================================
+# TABLA PUENTE: Llave_Cruce ePing → Capítulos HS reales
+# Expande rangos ('39-40') y mapea partidas exactas a su capítulo
+# Solo conserva capítulos que existen en exportaciones
+# ============================================================
+caps_en_exp = set(df_exp['Codigo capitulo'].unique())
+
+def llave_a_capitulos(llave):
+    """Convierte una Llave_Cruce en una lista de capítulos HS reales."""
+    llave = str(llave).strip()
+
+    # Rango tipo '39-40' o '94-96'
+    if '-' in llave and not llave.startswith('ENV'):
+        partes = llave.split('-')
+        try:
+            inicio, fin = int(partes[0]), int(partes[1])
+            return [c for c in range(inicio, fin + 1) if c in caps_en_exp]
+        except:
+            return []
+
+    # Partida exacta a 4 dígitos (ej: '8517', '8704', '9507')
+    if llave.isdigit() and len(llave) == 4:
+        cap = int(llave[:2])
+        return [cap] if cap in caps_en_exp else []
+
+    # Capítulo a 2 dígitos (ej: '85', '87', '90')
+    if llave.isdigit() and len(llave) == 2:
+        cap = int(llave)
+        return [cap] if cap in caps_en_exp else []
+
+    # ENV-General y otras no numéricas: sin mapeo directo
+    return []
+
+# Construir tabla puente
+tabla_puente_rows = []
+for _, row in df_eping.iterrows():
+    caps = llave_a_capitulos(row['Llave_Cruce'])
+    for cap in caps:
+        tabla_puente_rows.append({
+            'Document_symbol' : row['Document symbol'],
+            'Llave_Cruce'     : row['Llave_Cruce'],
+            'Capitulo_HS'     : cap,
+            'Distribution_date': row['Distribution date'],
+            'Title_ePing'     : row['Title'],
+            'Link_ePing'      : row['Link to notification(EN)']
+        })
+
+df_puente = pd.DataFrame(tabla_puente_rows).drop_duplicates()
+print(f"Tabla puente: {len(df_puente)} filas")
+print(f"Capítulos ePing mapeados a exportaciones: {sorted(df_puente['Capitulo_HS'].unique())}")
+
+# ============================================================
+# NIVEL 1: EXPORTACIONES ANUALES POR PARTIDA (pivot)
+# ============================================================
+pivot_exp = df_exp.pivot_table(
+    index=['HS_Key', 'Nombre partida', 'Codigo capitulo', 'Nombre capitulo'],
+    columns='Periodo',
+    values=' Dolares FOB',
+    aggfunc='sum'
+).reset_index()
+
+# Renombrar columnas de años
+pivot_exp.columns = [
+    str(c) if isinstance(c, int) else c
+    for c in pivot_exp.columns
+]
+
+# Calcular métricas de tendencia
+años = [str(y) for y in range(2019, 2026) if str(y) in pivot_exp.columns]
+pivot_exp['Total_2019_2025'] = pivot_exp[años].sum(axis=1)
+pivot_exp['Var_2019_2023']   = pivot_exp.get('2023', 0) - pivot_exp.get('2019', 0)
+pivot_exp['Var_2024_2025']   = pivot_exp.get('2025', 0) - pivot_exp.get('2024', 0)
+pivot_exp['Tendencia_Post_TBT'] = pivot_exp['Var_2024_2025'].apply(
+    lambda x: 'Creciendo' if x > 0 else ('Cayendo' if x < 0 else 'Estable')
+)
+
+# ============================================================
+# NIVEL 2: CONTEO DE TBTs I-TIP POR PARTIDA
+# ============================================================
+tbt_por_partida = df_tbt.groupby('HS_Key').agg(
+    TBT_Count        = ('HS_Key', 'count'),
+    TBT_Fecha_Min    = ('En preparación', 'min'),
+    TBT_Fecha_Max    = ('En preparación', 'max'),
+    TBT_Keywords     = ('Palabras clave', lambda x: ' | '.join(x.dropna().unique()[:3]))
+).reset_index()
+
+# ============================================================
+# NIVEL 3: CONTEO DE ALERTAS ePing POR CAPÍTULO
+# ============================================================
+eping_por_capitulo = df_puente.groupby('Capitulo_HS').agg(
+    ePing_Alertas        = ('Document_symbol', 'nunique'),
+    ePing_Fecha_Min      = ('Distribution_date', 'min'),
+    ePing_Fecha_Max      = ('Distribution_date', 'max'),
+    ePing_Llaves         = ('Llave_Cruce', lambda x: ' | '.join(x.unique()))
+).reset_index()
+
+# ============================================================
+# CONSTRUCCIÓN DEL ARCHIVO MAESTRO
+# ============================================================
+df_maestro = pivot_exp.copy()
+
+# Join con TBTs (por partida HS_Key)
+df_maestro = df_maestro.merge(tbt_por_partida, on='HS_Key', how='left')
+
+# Join con ePing (por capítulo)
+df_maestro = df_maestro.merge(
+    eping_por_capitulo,
+    left_on='Codigo capitulo',
+    right_on='Capitulo_HS',
+    how='left'
+).drop(columns=['Capitulo_HS'], errors='ignore')
+
+# Rellenar nulos
+df_maestro['TBT_Count']     = df_maestro['TBT_Count'].fillna(0).astype(int)
+df_maestro['ePing_Alertas'] = df_maestro['ePing_Alertas'].fillna(0).astype(int)
+
+# ============================================================
+# ÍNDICE DE PERSISTENCIA DE RIESGO
+# ============================================================
+def clasificar_riesgo(row):
+    tiene_tbt   = row['TBT_Count'] > 0
+    tiene_eping = row['ePing_Alertas'] > 0
+
+    if tiene_tbt and tiene_eping:
+        return '🔴 Riesgo Extremo'       # Presión histórica + amenaza nueva
+    elif tiene_eping and not tiene_tbt:
+        return '🟡 Riesgo Emergente'     # Solo alerta nueva
+    elif tiene_tbt and not tiene_eping:
+        return '🟠 Riesgo Crónico'       # Solo presión histórica
+    else:
+        return '🟢 Sin Riesgo Identificado'
+
+df_maestro['Indice_Persistencia_Riesgo'] = df_maestro.apply(clasificar_riesgo, axis=1)
+
+# Score numérico para ordenar en Power BI
+score_map = {
+    '🔴 Riesgo Extremo'           : 4,
+    '🟡 Riesgo Emergente'         : 3,
+    '🟠 Riesgo Crónico'           : 2,
+    '🟢 Sin Riesgo Identificado'  : 1
+}
+df_maestro['Score_Riesgo'] = df_maestro['Indice_Persistencia_Riesgo'].map(score_map)
+
+# ============================================================
+# CONTEXTO NARRATIVO (para tooltips en Power BI)
+# ============================================================
+def narrativa(row):
+    if row['Score_Riesgo'] == 4:
+        return (f"Partida con {row['TBT_Count']} medidas TBT en preparación (I-TIP) "
+                f"y {row['ePing_Alertas']} alertas ePing activas (2024-2026). "
+                f"Exportaciones 2025 en tendencia {row['Tendencia_Post_TBT'].lower()}.")
+    elif row['Score_Riesgo'] == 3:
+        return (f"Sin historial TBT en I-TIP, pero {row['ePing_Alertas']} alertas "
+                f"ePing nuevas en 2024-2026 representan riesgo emergente.")
+    elif row['Score_Riesgo'] == 2:
+        return (f"{row['TBT_Count']} medidas TBT en preparación en I-TIP. "
+                f"Sin alertas ePing nuevas. Exportaciones {row['Tendencia_Post_TBT'].lower()} en 2024-2025.")
+    else:
+        return "Sin medidas TBT registradas ni alertas ePing en el período analizado."
+
+df_maestro['Narrativa_Riesgo'] = df_maestro.apply(narrativa, axis=1)
+
+# ============================================================
+# ORDENAR Y SELECCIONAR COLUMNAS FINALES
+# ============================================================
+columnas_finales = (
+    ['HS_Key', 'Nombre partida', 'Codigo capitulo', 'Nombre capitulo']
+    + años
+    + ['Total_2019_2025', 'Var_2019_2023', 'Var_2024_2025', 'Tendencia_Post_TBT']
+    + ['TBT_Count', 'TBT_Fecha_Min', 'TBT_Fecha_Max', 'TBT_Keywords']
+    + ['ePing_Alertas', 'ePing_Fecha_Min', 'ePing_Fecha_Max', 'ePing_Llaves']
+    + ['Indice_Persistencia_Riesgo', 'Score_Riesgo', 'Narrativa_Riesgo']
+)
+
+df_maestro = df_maestro[columnas_finales].sort_values(
+    ['Score_Riesgo', 'Total_2019_2025'], ascending=[False, False]
+)
+
+# ============================================================
+# TABLA PUENTE FINAL (hoja separada en el Excel)
+# ============================================================
+df_puente_final = df_puente[['Llave_Cruce','Capitulo_HS','Document_symbol',
+                              'Distribution_date','Title_ePing','Link_ePing']]
+
+# ============================================================
+# EXPORTAR A EXCEL CON DOS HOJAS
+# ============================================================
+with pd.ExcelWriter('Maestro_Riesgo_TBT_ePing.xlsx', engine='openpyxl') as writer:
+    df_maestro.to_excel(writer, sheet_name='Maestro', index=False)
+    df_puente_final.to_excel(writer, sheet_name='Tabla_Puente_ePing', index=False)
+
+# ============================================================
+# RESUMEN EJECUTIVO
+# ============================================================
+print("\n" + "="*60)
+print("RESUMEN EJECUTIVO - ARCHIVO MAESTRO")
+print("="*60)
+print(f"Total partidas analizadas: {len(df_maestro)}")
+print(f"\nDistribución del Índice de Persistencia de Riesgo:")
+print(df_maestro['Indice_Persistencia_Riesgo'].value_counts().to_string())
+print(f"\nTop 10 partidas por riesgo y valor exportado:")
+cols_top = ['HS_Key','Nombre partida','Total_2019_2025',
+            'TBT_Count','ePing_Alertas','Indice_Persistencia_Riesgo']
+print(df_maestro[cols_top].head(10).to_string())
+print("\n✅ Archivo exportado: Maestro_Riesgo_TBT_ePing.xlsx")
