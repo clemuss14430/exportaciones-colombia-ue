@@ -18,25 +18,14 @@ The pipeline integrates three international databases at the HS-4 digit level an
 
 ---
 
-## Repository Structure
+## Files in this Repository
 
-```
-exportaciones-colombia-ue/
-│
-├── scripts/
-│   ├── 01_Unification_of_Colombian_exports_to_the_EU.py   # Export data unification and filtering
-│   ├── 02_Homologation_and_organization_of_ePing_notifications_(2024-2026).py          # ePing alert normalization (ICS → HS)
-│   └── 03_Master_File-Data_Unification.py             # Master file construction + RPI calculation
-│
-├── data/
-│   └── processed/                        # Cleaned output files (raw data not included)
-│
-├── dashboard/
-│   └── vulnerabilidad_regulatoria.pbix   # Power BI dashboard (3 synchronized tabs)
-│
-├── requirements.txt
-└── README.md
-```
+| File | Description |
+|------|-------------|
+| `01 Unification of Colombian exports to the EU` | Export data unification and filtering (ODEB, 2019–2025) |
+| `02 Homologation and organization of ePing notifications` | ePing alert normalization — ICS → HS equivalence mapping |
+| `03 Master file - Data unification` | Master file construction + RPI calculation |
+| `README.md` | Project documentation |
 
 ---
 
@@ -52,26 +41,26 @@ exportaciones-colombia-ue/
 
 ---
 
-## Scripts — Execution Order
+## Execution Order
 
-Run the scripts sequentially (1 → 2 → 3). Each script produces the input required by the next.
+Run the scripts sequentially: **01 → 02 → 03**. Each script produces the input required by the next.
 
-### Script 1 — `01_Unification_of_Colombian_exports_to_the_EU.py`
+### Script 01 — `Unification of Colombian exports to the EU`
 Unifies annual ODEB export files into a single dataset. Filters HS Chapters 39–96 (manufactured goods and diversified consumer products) and retains only trade flows destined for the 27 EU member states.
 
-**Output:** `data/processed/exportaciones_colombia_ue_2019_2025.csv`
+**Output:** unified export base (2019–2025), filtered to EU destinations and HS 39–96.
 
 ---
 
-### Script 2 — `02_Homologation_and_organization_of_ePing_notifications_(2024-2026).py`
+### Script 02 — `Homologation and organization of ePing notifications`
 Processes the 158 EU ePing notifications (2024–2026). Separates multiple product codes per row into individual records, prioritizes HS codes over ICS codes, and applies an ICS-to-HS equivalence dictionary for notifications without a direct tariff code. Removes unidentifiable entries.
 
-**Output:** `data/processed/eping_homologado_limpio.csv` (109 records, no null values)
+**Output:** clean dataset of 109 records, no null values, homogeneous HS coding.
 
 ---
 
-### Script 3 — `03_Master_File-Data_Unification.py`
-Integrates all three sources at the HS-4 digit level. Builds a bridge table that maps ePing chapter ranges to specific tariff headings with verified trade flows. Calculates the **Risk Persistence Index (RPI)** for each of the 72 export lines:
+### Script 03 — `Master file - Data unification`
+Integrates all three sources at the HS-4 digit level. Builds a bridge table that maps ePing chapter ranges to specific tariff headings with verified trade flows. Calculates the **Risk Persistence Index (RPI)** for each of the 72 export lines.
 
 | RPI Category | Definition | Score |
 |---|---|---|
@@ -80,7 +69,7 @@ Integrates all three sources at the HS-4 digit level. Builds a bridge table that
 | Emerging Risk | Present in ePing only | 2 |
 | No Identified Risk | Absent from both sources | 1 |
 
-**Output:** `data/processed/archivo_maestro_ipr.xlsx`
+**Output:** master file with 72 tariff headings, annual FOB values (2019–2025), regulatory pressure metrics, and RPI classification.
 
 ---
 
@@ -96,18 +85,8 @@ numpy
 Install all dependencies:
 
 ```bash
-pip install -r requirements.txt
+pip install pandas openpyxl numpy
 ```
-
----
-
-## Power BI Dashboard
-
-The file `dashboard/vulnerabilidad_regulatoria.pbix` requires **Microsoft Power BI Desktop 2024** or later. The dashboard contains three synchronized tabs:
-
-1. **Historical Vulnerability Matrix** — regulatory intensity vs. export value (2019–2023)
-2. **Prospective Radar** — temporal and sectoral distribution of ePing alerts (2024–2026)
-3. **Master Cross** — bubble chart where bubble size represents export value at risk; filters are synchronized across all three tabs
 
 ---
 
@@ -115,9 +94,9 @@ The file `dashboard/vulnerabilidad_regulatoria.pbix` requires **Microsoft Power 
 
 - **81.9%** of the export portfolio (59 of 72 tariff headings) is classified as **Extreme Risk**
 - Over **USD 99.2 million** in exports face simultaneous historical and prospective regulatory pressure
-- **Chapter 85** (electrical and electronic equipment) is the most vulnerable sector: 22 historical measures + 10 active prospective alerts
-- **Chapter 87** (vehicles): exports grew **+562%** while accumulating new regulatory alerts — highest combination of growing exposure and regulatory risk
-- Central paradox: despite high regulatory pressure, several product lines continue growing, suggesting that Colombian exporters are not yet incorporating these regulatory signals into their decisions
+- **Chapter 85** (electrical and electronic equipment): highest vulnerability — 22 historical measures + 10 active prospective alerts
+- **Chapter 87** (vehicles): exports grew **+562%** while accumulating new regulatory alerts
+- Central paradox: despite high regulatory pressure, several product lines continue growing, suggesting Colombian exporters are not yet incorporating these regulatory signals into their decisions
 
 ---
 
@@ -133,7 +112,7 @@ If you use this repository or any of its scripts in your research, please cite a
 
 **Carlos Iván Lemus Serna**  
 International Business · Universidad EAN  
-Semillero Inglomark · LEMON Research Group (Laboratorio de Emprendimiento, Oportunidades y Negocios)  
+Semillero Inglomark · LEMON Research Group  
 Bogotá, Colombia
 
 ---
