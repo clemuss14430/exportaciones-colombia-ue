@@ -2,107 +2,301 @@ import pandas as pd
 import numpy as np
 import re
 
-# 1. Cargar el archivo original
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. CARGA Y FILTRO INICIAL
+# ─────────────────────────────────────────────────────────────────────────────
 df_raw = pd.read_excel('Notifications (Jan 2024 - Today).xlsx')
 
-# Filtrar por UE y Medio Ambiente
 df = df_raw[
-    (df_raw['Notifying Member'] == 'European Union') & 
+    (df_raw['Notifying Member'] == 'European Union') &
     (df_raw['Objectives'].str.contains('environment', case=False, na=False))
 ].copy()
 
-# 2. FUNCIÓN PARA EXTRAER CÓDIGOS
+print(f"Notificaciones UE ambientales en bruto: {len(df)}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. FUNCIÓN DE EXTRACCIÓN DE CÓDIGOS
+#
+#    ePing usa "." como placeholder cuando no hay código — se filtra.
+#    Se separa por ";" y se extrae el primer número de cada elemento.
+# ─────────────────────────────────────────────────────────────────────────────
 def extraer_lista_codigos(texto):
-    if pd.isna(texto) or str(texto).lower() in ('nan', 'none', ''):
+    if pd.isna(texto) or str(texto).strip().lower() in ('nan', 'none', '', '.'):
         return []
     elementos = str(texto).split(';')
     codigos = []
     for item in elementos:
-        match = re.search(r'([\d\.]+)', item)
+        item = item.strip()
+        match = re.search(r'(\d[\d\.]+)', item)
         if match:
-            codigos.append(match.group(1))
+            codigo = match.group(1).strip('.')
+            if codigo:
+                codigos.append(codigo)
     return list(set(codigos))
 
-# Aplicamos la extracción
-df['HS_Clean_List'] = df['HS code(s)'].apply(extraer_lista_codigos)
+df['HS_Clean_List']  = df['HS code(s)'].apply(extraer_lista_codigos)
 df['ICS_Clean_List'] = df['ICS code(s)'].apply(extraer_lista_codigos)
 
-# 3. DICCIONARIO ICS -> HS
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. DICCIONARIO ICS → CAPÍTULO(S) HS
+#
+#    Basado íntegramente en la correspondencia oficial entre los grupos
+#    temáticos del ICS (ISO) y los capítulos del Sistema Armonizado (SA/HS).
+#    No asume nada sobre qué capítulos exporta un país en particular.
+#
+#    Criterios de mapeo:
+#    - Un ICS que cubre un único capítulo HS → se mapea directo ("85", "87")
+#    - Un ICS que cubre un rango de capítulos → se expresa como rango ("28-38")
+#      para que el script de integración lo expanda según corresponda
+#    - ICS 13.020 (Gestión ambiental general) y 13.220.20 (equipos marinos):
+#      no tienen correspondencia HS específica → ENV-General
+#      Se conservan para trazabilidad pero no generan cruce de producto
+#
+#    Estructura del diccionario: de más específico a más general.
+#    La función de búsqueda aplica primero el código más específico disponible.
+# ─────────────────────────────────────────────────────────────────────────────
 ics_to_hs = {
-    '71': '28-38',       # Industria Química
-    '13': 'ENV-General', # Medio Ambiente
-    '55': '48-39',       # Packaging
-    '83': '39-40',       # Caucho y Plásticos
-    '43': '87',          # Vehículos de carretera
-    '29': '85',          # Ingeniería Eléctrica
-    '65': '01-24',       # Agricultura
-    '67': '16-24',       # Tecnología Alimentaria
-    '79': '44',          # Madera
-    '11': '01-05',       # Animales y productos
-    '31': '31',          # Fertilizantes
-    '47': '47',          # Industria de pasta y papel
-    '97': '94-96',       # Equipos domésticos y de ocio
-    '07': '90',          # Metrología e instrumentación
-    '33': '33',          # Química fina
-    '35': '39-40',       # Plásticos
-    '91': '91'           # Electrónica de consumo
+
+    # ── ICS 07 — Metrología, medición, fenómenos físicos ────────────────────
+    '07': '90',
+    '07.080': '90',       # Instrumentos de medición → cap. 90
+
+    # ── ICS 11 — Medicina y salud ────────────────────────────────────────────
+    '11': '30',
+    '11.120': '30',       # Medicamentos veterinarios → cap. 30
+    '11.220': '30',       # Veterinaria general → cap. 30
+
+    # ── ICS 13 — Medio ambiente, protección de la salud, seguridad ──────────
+    # Subclases con destino HS específico:
+    '13.030': '85',       # Gestión de residuos (incluye baterías) → cap. 85
+    '13.030.30': '85',    # Residuos de baterías → cap. 85
+    '13.040': '87',       # Calidad del aire / emisiones de vehículos → cap. 87
+    '13.040.50': '87',    # Emisiones de gases de combustión → cap. 87
+    '13.220': '39-40',    # Protección contra incendios / PFAS → caps. 39-40
+    '13.220.10': '39-40', # PFAS en espumas contra incendios → caps. 39-40
+    # Subclases sin correspondencia HS de producto:
+    '13': 'ENV-General',
+    '13.020': 'ENV-General',    # Gestión ambiental general (marco normativo)
+    '13.020.10': 'ENV-General',
+    '13.220.20': 'ENV-General', # Equipos marítimos contra incendio
+
+    # ── ICS 29 — Ingeniería eléctrica ────────────────────────────────────────
+    '29': '85',
+    '29.100': '85',       # Equipos eléctricos → cap. 85
+    '29.200': '85',       # Rectificadores, inversores → cap. 85
+
+    # ── ICS 31 — Fertilizantes ───────────────────────────────────────────────
+    '31': '31',
+    '31.080': '31',       # Fertilizantes → cap. 31
+
+    # ── ICS 33 — Química fina ────────────────────────────────────────────────
+    '33': '33',
+    '33.100': '33',       # Aceites esenciales, perfumería → cap. 33
+
+    # ── ICS 35 — Plásticos ───────────────────────────────────────────────────
+    '35': '39',
+    '35.040': '39',       # Plásticos en general → cap. 39
+    '35.100': '39',       # Plásticos para uso específico → cap. 39
+
+    # ── ICS 43 — Vehículos de carretera ─────────────────────────────────────
+    '43': '87',
+    '43.040': '87',       # Sistemas de vehículos de carretera → cap. 87
+    '43.060': '87',       # Motores de combustión interna → cap. 87
+    '43.080': '87',       # Vehículos comerciales → cap. 87
+    '43.120': '87',       # Vehículos eléctricos → cap. 87
+
+    # ── ICS 47 — Industria de pasta y papel ──────────────────────────────────
+    '47': '47',
+    '47.020': '47',       # Industria papelera → cap. 47
+
+    # ── ICS 55 — Embalaje y distribución ────────────────────────────────────
+    '55': '39',           # Embalajes (mayormente plástico) → cap. 39
+    '55.020': '39',
+    '55.080': '48',       # Embalajes de papel → cap. 48
+    '55.100': '70',       # Envases de vidrio → cap. 70
+
+    # ── ICS 65 — Agricultura ─────────────────────────────────────────────────
+    '65': '01-24',
+    '65.020': '01-24',    # Agricultura y silvicultura → caps. 01-24
+    '65.020.20': '01-24',
+    '65.020.30': '01-24',
+    '65.080': '01-24',    # Fertilizantes y suelos → caps. 01-24
+    '65.100': '01-24',    # Pesticidas y agroquímicos → caps. 01-24
+    '65.120': '01-24',    # Alimentación animal → caps. 01-24
+    '65.140': '01-24',    # Equipos de riego → caps. 01-24 (uso agrícola)
+    '65.150': '01-24',    # Acuicultura → caps. 01-24
+
+    # ── ICS 67 — Tecnología de los alimentos ─────────────────────────────────
+    '67': '16-24',
+    '67.040': '16-24',    # Alimentos en general → caps. 16-24
+    '67.050': '16-24',    # Métodos de análisis de alimentos → caps. 16-24
+    '67.060': '11-19',    # Cereales y derivados → caps. 11-19
+    '67.080': '07-08',    # Frutas y verduras → caps. 07-08
+    '67.100': '04',       # Leche y productos lácteos → cap. 04
+    '67.120': '02-04',    # Carnes y derivados → caps. 02-04
+    '67.140': '09',       # Té, café, cacao → cap. 09
+    '67.180': '17',       # Azúcar y derivados → cap. 17
+    '67.200': '15',       # Grasas y aceites → cap. 15
+    '67.220': '09-21',    # Especias y condimentos → caps. 09-21
+    '67.230': '22',       # Bebidas → cap. 22
+    '67.260': '21',       # Plantas de procesado de alimentos → cap. 21
+
+    # ── ICS 71 — Industria química ────────────────────────────────────────────
+    '71': '28-38',
+    '71.040': '28-38',    # Química analítica → caps. 28-38
+    '71.060': '28',       # Química inorgánica → cap. 28
+    '71.080': '29',       # Química orgánica → cap. 29
+    '71.100': '28-38',    # Productos químicos para uso industrial → caps. 28-38
+    '71.100.70': '28-38', # Pesticidas → caps. 28-38
+
+    # ── ICS 79 — Industria de la madera ──────────────────────────────────────
+    '79': '44',
+    '79.020': '44',       # Madera aserrada → cap. 44
+    '79.040': '44',       # Madera y tableros → cap. 44
+    '79.060': '44',       # Tableros de madera → cap. 44
+    '79.080': '44',       # Madera preservada → cap. 44
+    '79.100': '47',       # Pasta de madera → cap. 47
+    '79.120': '44',       # Herramientas para madera → cap. 44
+
+    # ── ICS 83 — Caucho y plásticos ──────────────────────────────────────────
+    '83': '39-40',
+    '83.040': '40',       # Caucho natural → cap. 40
+    '83.060': '40',       # Caucho vulcanizado → cap. 40
+    '83.080': '39-40',    # Materiales plásticos → caps. 39-40
+    '83.100': '39-40',    # Materiales celulares → caps. 39-40
+    '83.140': '40',       # Productos de caucho → cap. 40
+    '83.160': '40',       # Neumáticos → cap. 40
+    '83.180': '39',       # Adhesivos → cap. 39
+    '83.200': '39',       # Equipos para plásticos → cap. 39
+
+    # ── ICS 91 — Construcción ────────────────────────────────────────────────
+    '91': '68-70',
+    '91.010': '68-70',    # Materiales de construcción → caps. 68-70
+    '91.040': '68-70',    # Edificios → caps. 68-70
+    '91.060': '68-70',    # Elementos de construcción → caps. 68-70
+    '91.100': '68-70',    # Materiales de construcción → caps. 68-70
+    '91.100.10': '70',    # Vidrio para construcción → cap. 70
+    '91.100.15': '70',    # Vidrio → cap. 70
+    '91.100.30': '68',    # Piedra, yeso, cemento → cap. 68
+    '91.100.40': '69',    # Cerámica y porcelana → cap. 69
+
+    # ── ICS 97 — Equipos domésticos y de ocio ────────────────────────────────
+    '97': '94-96',
+    '97.040': '84',       # Equipos de cocina → cap. 84
+    '97.060': '56-63',    # Textiles para el hogar → caps. 56-63
+    '97.100': '73',       # Calefacción → cap. 73
+    '97.120': '84',       # Equipos domésticos automáticos → cap. 84
+    '97.140': '94',       # Muebles → cap. 94
+    '97.180': '94',       # Accesorios de construcción para el hogar → cap. 94
+    '97.200': '95',       # Equipos de entretenimiento → cap. 95
+    '97.220': '95-96',    # Equipos deportivos → caps. 95-96
+    '97.230': '95',       # Juguetes → cap. 95
 }
 
-# 4. LÓGICA DE PRIORIZACIÓN Y CREACIÓN DE FILAS
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. FUNCIÓN DE BÚSQUEDA EN DICCIONARIO
+#    Busca desde el código ICS más específico hasta el más general.
+# ─────────────────────────────────────────────────────────────────────────────
+def resolver_ics(ics_codigo):
+    ics_limpio = str(ics_codigo).strip()
+    # 1. Código exacto
+    if ics_limpio in ics_to_hs:
+        return ics_to_hs[ics_limpio]
+    # 2. Prefijos progresivamente más cortos (65.020.30 → 65.020 → 65)
+    partes = ics_limpio.split('.')
+    for i in range(len(partes) - 1, 0, -1):
+        prefijo = '.'.join(partes[:i])
+        if prefijo in ics_to_hs:
+            return ics_to_hs[prefijo]
+    # 3. Solo el primer número
+    primer_num = partes[0]
+    if primer_num in ics_to_hs:
+        return ics_to_hs[primer_num]
+    # 4. Sin mapeo conocido → marcar para revisión
+    return f'ICS_{primer_num}'
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. LÓGICA DE PRIORIZACIÓN Y EXPLOSIÓN DE FILAS
+#
+#    Llave_Cruce para códigos HS:
+#    - 2 dígitos → capítulo directo, se conserva tal cual
+#    - 4+ dígitos → se trunca a 2 (capítulo) para consistencia,
+#      excepto cuando es una partida específica de 4 dígitos que tiene
+#      sentido conservar para análisis más granular
+#      (el script de integración puede trabajar con ambos niveles)
+# ─────────────────────────────────────────────────────────────────────────────
+def llave_desde_hs(hs_codigo):
+    clean = str(hs_codigo).replace('.', '').strip()
+    if len(clean) <= 2:
+        return clean
+    else:
+        # Conservar 4 dígitos si son una partida reconocible (primer dígito > 0)
+        # El script de integración puede truncar si lo necesita
+        return clean[:4] if len(clean) >= 4 else clean[:2]
+
 rows = []
 for _, row in df.iterrows():
-    hs_list = row['HS_Clean_List']
+    hs_list  = row['HS_Clean_List']
     ics_list = row['ICS_Clean_List']
-    
-    # Eliminar SOLO si no tiene ningún código (ni HS ni ICS)
+
     if not hs_list and not ics_list:
         continue
-        
-    # Prioridad 1: Si hay HS, una fila por cada código HS
+
+    # Prioridad 1: HS disponible → una fila por código HS
     if hs_list:
         for hs in hs_list:
             new_row = row.copy()
-            clean_hs = hs.replace('.', '')
-            new_row['HS_Separado'] = hs
+            new_row['HS_Separado']  = hs
             new_row['ICS_Separado'] = ''
-            new_row['Llave_Cruce'] = clean_hs[:4] if len(clean_hs) >= 4 else clean_hs[:2]
+            new_row['Llave_Cruce']  = llave_desde_hs(hs)
             rows.append(new_row)
-    
-    # Prioridad 2: Si NO hay HS pero sí ICS, una fila por cada ICS
+
+    # Prioridad 2: Solo ICS → una fila por código ICS
     else:
         for ics in ics_list:
             new_row = row.copy()
-            prefijo = ics.split('.')[0]
-            new_row['HS_Separado'] = ''
-            new_row['ICS_Separado'] = ics
-            new_row['Llave_Cruce'] = ics_to_hs.get(prefijo, f'ICS_{prefijo}')
+            new_row['HS_Separado']  = ''
+            new_row['ICS_Separado'] = ics.strip()
+            new_row['Llave_Cruce']  = resolver_ics(ics)
             rows.append(new_row)
 
-# 5. CONVERTIR A DATAFRAME
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. CONSTRUCCIÓN Y EXPORTACIÓN DEL DATAFRAME FINAL
+# ─────────────────────────────────────────────────────────────────────────────
 df_final = pd.DataFrame(rows)
 
-# 6. SELECCIÓN DE COLUMNAS
 columnas_mantener = [
-    'Distribution date', 'Document symbol', 'Title', 'Description', 
+    'Distribution date', 'Document symbol', 'Title', 'Description',
     'Products covered', 'HS code(s)', 'HS_Separado',
     'ICS code(s)', 'ICS_Separado',
-    'Objectives', 'Proposed date of adoption', 
-    'Proposed date of entry into force', 
+    'Objectives', 'Proposed date of adoption',
+    'Proposed date of entry into force',
     'Link to notification(EN)', 'Llave_Cruce'
 ]
+df_final = df_final[[c for c in columnas_mantener if c in df_final.columns]]
 
-df_final = df_final[[col for col in columnas_mantener if col in df_final.columns]]
-
-# 7. FIX: fillna DESPUÉS de la selección de columnas
-df_final['HS_Separado'] = df_final['HS_Separado'].fillna('')
+df_final['HS_Separado']  = df_final['HS_Separado'].fillna('')
 df_final['ICS_Separado'] = df_final['ICS_Separado'].fillna('')
 
-# 8. EXPORTACIÓN
-df_final.to_excel('Alertas_ePing_Limpias_V4.xlsx', index=False)
+df_final.to_excel('Alertas_ePing_Limpias_V5.xlsx', index=False)
 
-print(f"Original UE Ambiental:        {len(df)} notificaciones")
-print(f"Eliminadas (sin HS ni ICS):   {len(df) - df_final['Document symbol'].nunique()} notificaciones")
-print(f"Notificaciones conservadas:   {df_final['Document symbol'].nunique()}")
-print(f"Filas totales tras explosión: {len(df_final)}")
-print(f"\nLlave_Cruce más frecuentes:\n{df_final['Llave_Cruce'].value_counts().head(10)}")
-print(f"\nICS sin mapear (revisar manual):\n{df_final[df_final['Llave_Cruce'].str.startswith('ICS_', na=False)]['Llave_Cruce'].value_counts()}")
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. REPORTE
+# ─────────────────────────────────────────────────────────────────────────────
+print(f"\nOriginal UE Ambiental:           {len(df)} notificaciones")
+print(f"Notificaciones conservadas:      {df_final['Document symbol'].nunique()}")
+print(f"Filas totales tras explosión:    {len(df_final)}")
+
+print(f"\nDistribución de Llave_Cruce:")
+print(df_final['Llave_Cruce'].value_counts().to_string())
+
+sin_mapear = df_final[df_final['Llave_Cruce'].str.startswith('ICS_', na=False)]
+print(f"\nFilas sin mapear (ICS_xxx):      {len(sin_mapear)}")
+if len(sin_mapear) > 0:
+    print(sin_mapear[['Document symbol', 'ICS_Separado', 'Title']].to_string())
+
+env_count = len(df_final[df_final['Llave_Cruce'] == 'ENV-General'])
+print(f"\nFilas ENV-General:               {env_count}")
+print("  Regulaciones de marco general sin partida HS de producto específico.")
+print("  Se conservan para trazabilidad.")
