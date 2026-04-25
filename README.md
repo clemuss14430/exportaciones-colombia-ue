@@ -1,4 +1,4 @@
-# exportaciones-colombia-ue
+# eu-tbt-export-risk-colombia
 
 **Latent Risk and Regulatory Persistence: European Environmental TBTs as a Structural Threat to Colombian Manufacturing Exports, 2019–2026**
 
@@ -104,7 +104,7 @@ pip install pandas openpyxl numpy
 
 If you use this repository or any of its scripts in your research, please cite as:
 
-> Lemus Serna, C. I. (2026). *exportaciones-colombia-ue* [Source code repository]. GitHub. https://github.com/clemuss14430/exportaciones-colombia-ue
+> Lemus Serna, C. I. (2026). *eu-tbt-export-risk-colombia* [Source code repository]. GitHub. https://github.com/clemuss14430/eu-tbt-export-risk-colombia
 
 ---
 
